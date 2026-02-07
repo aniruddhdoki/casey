@@ -1,6 +1,3 @@
 'use strict';
-// Load .env before server.js runs so OPENAI_API_KEY is available when agent.js loads.
+// Load .env before server.js runs so AWS credentials are available.
 require('dotenv').config();
-if (!process.env.OPENAI_API_KEY) {
-  require('dotenv').config({ path: '.env.example' });
-}

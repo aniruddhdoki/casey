@@ -23,10 +23,19 @@ cd backend
 ./run.sh
 ```
 
-**Environment (optional):**
+**Environment:**
 
 - `PORT` – port to listen on (default: 3001)
-- `OPENAI_API_KEY` – set for real STT/LLM/TTS; without it the backend sends only a viseme test (no audio)
+- `AWS_REGION` – AWS region (default: us-east-1)
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` – for local dev; or use `AWS_PROFILE` / IAM role
+
+Without AWS credentials, the backend sends only a viseme test (no audio). Use Terraform to provision IAM policy:
+
+```bash
+cd ../terraform
+terraform init && terraform plan && terraform apply
+# Use casey_localdev_service credentials (or a profile that uses them), then set AWS_REGION in .env
+```
 
 **WebRTC (wrtc):** The server requires the `wrtc` package. The backend lists `node-pre-gyp` as a dependency so that `wrtc`’s install script can find it; if you previously saw `node-pre-gyp: command not found`, run `npm install` again. On startup you should see `[Backend] WebRTC (wrtc) loaded successfully` before the HTTP server message. If you see "WebRTC not available" in the frontend, the backend process is likely an old one—stop it and start again with `npm run dev` from the `backend` folder. If the backend exits immediately with "Failed to load WebRTC", install build tools and run `npm install wrtc` again; see [node-webrtc](https://github.com/node-webrtc/node-webrtc) for details.
 

@@ -131,6 +131,7 @@ export default function Interview() {
     );
 }
 
+// Polly neural viseme codes -> avatar morph targets (matches AWS Polly viseme list)
 const corresponding: Record<string, string> = {
     'p': 'viseme_PP',
     't': 'viseme_DD',
@@ -142,6 +143,14 @@ const corresponding: Record<string, string> = {
     'e': 'viseme_EH',
     'E': 'viseme_EY',
     'o': 'viseme_OW',
+    // Additional Polly visemes for better lip-sync
+    'k': 'viseme_DD',
+    'f': 'viseme_PP',
+    's': 'viseme_SH',
+    'dZ': 'viseme_SH',
+    'tS': 'viseme_SH',
+    'd': 'viseme_DD',
+    'b': 'viseme_PP',
 };
 
 const VISEME_TEST_ENABLED = false;  // Set true to run looping viseme test sequence.

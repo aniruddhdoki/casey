@@ -9,7 +9,12 @@ const MIN_SPEECH_DURATION_MS = 3000;
 const ENERGY_THRESHOLD = 300;
 const DEFAULT_SAMPLE_RATE = 48000;
 
-export function createVAD(onSilenceDetected) {
+/**
+ * @param {Function} onSilenceDetected - (utteranceChunks, sampleRate) => void
+ * @param {{ onAudioChunk?: (buffer: ArrayBuffer|Buffer, sampleRate: number) => void }} [options]
+ */
+export function createVAD(onSilenceDetected, options = {}) {
+  const { onAudioChunk } = options;
   let totalSilenceMs = 0;
   let totalVoiceMs = 0;
   let agentTriggered = false;
@@ -58,7 +63,12 @@ export function createVAD(onSilenceDetected) {
     }
 
     if (hasSeenVoiceThisRound) {
-      utteranceBuffer.push({ data: buffer ?? samples, sampleRate, byteLength });
+      const raw = buffer ?? samples;
+      utteranceBuffer.push({ data: raw, sampleRate, byteLength });
+      if (onAudioChunk) {
+        const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+        onAudioChunk(buf, sampleRate);
+      }
     }
 
     const now = Date.now();

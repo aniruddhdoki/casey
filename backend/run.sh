@@ -12,4 +12,4 @@ fi
 
 PORT="${PORT:-3001}"
 echo "Starting backend on http://localhost:$PORT (WebSocket: ws://localhost:$PORT/ws)"
-exec node server.js
+exec node -r ./preload.cjs server.js
