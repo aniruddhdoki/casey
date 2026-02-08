@@ -3,6 +3,8 @@
  * Option A: Stream audio to Transcribe in real-time as VAD feeds chunks.
  */
 
+import { logAWSUsage, ensureInitialized } from './cloudwatch-logger.js';
+
 const DEFAULT_SAMPLE_RATE = 48000;
 const END_SENTINEL = Symbol('end');
 
@@ -32,6 +34,7 @@ export function createStreamingSTT(sampleRate = DEFAULT_SAMPLE_RATE) {
   let transcriptResolve = null;
 
   async function runTranscribe() {
+    await ensureInitialized();
     const region = process.env.AWS_REGION || 'us-east-1';
     const { TranscribeStreamingClient, StartStreamTranscriptionCommand } = await import(
       '@aws-sdk/client-transcribe-streaming'
@@ -55,19 +58,33 @@ export function createStreamingSTT(sampleRate = DEFAULT_SAMPLE_RATE) {
     }
 
     let fullTranscript = '';
+    const startTime = Date.now();
+    let audioChunkCount = 0;
+    let transcriptEventCount = 0;
 
     try {
-      const command = new StartStreamTranscriptionCommand({
+      const commandParams = {
         LanguageCode: 'en-US',
         MediaSampleRateHertz: sampleRate,
         MediaEncoding: 'pcm',
         AudioStream: audioGenerator(),
+      };
+
+      await logAWSUsage('Transcribe', 'StartStreamTranscription', {
+        event: 'request',
+        request: {
+          languageCode: commandParams.LanguageCode,
+          mediaSampleRateHertz: commandParams.MediaSampleRateHertz,
+          mediaEncoding: commandParams.MediaEncoding,
+        },
       });
 
+      const command = new StartStreamTranscriptionCommand(commandParams);
       const response = await client.send(command);
 
       if (response.TranscriptResultStream) {
         for await (const event of response.TranscriptResultStream) {
+          transcriptEventCount++;
           if (event.TranscriptEvent?.Transcript?.Results) {
             for (const result of event.TranscriptEvent.Transcript.Results) {
               if (!result.IsPartial && result.Alternatives?.[0]?.Transcript) {
@@ -77,8 +94,30 @@ export function createStreamingSTT(sampleRate = DEFAULT_SAMPLE_RATE) {
           }
         }
       }
+
+      const duration = Date.now() - startTime;
+      await logAWSUsage('Transcribe', 'StartStreamTranscription', {
+        event: 'response',
+        status: 'success',
+        durationMs: duration,
+        transcriptLength: fullTranscript.length,
+        transcriptEventCount,
+        transcript: fullTranscript.trim() || '(empty)',
+      });
     } catch (e) {
+      const duration = Date.now() - startTime;
       console.error('[STT] Transcribe streaming failed:', e.message);
+      await logAWSUsage('Transcribe', 'StartStreamTranscription', {
+        event: 'error',
+        status: 'error',
+        durationMs: duration,
+        error: {
+          name: e.name,
+          message: e.message,
+          code: e.code,
+          $metadata: e.$metadata,
+        },
+      });
     }
 
     return fullTranscript.trim();

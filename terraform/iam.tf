@@ -30,6 +30,16 @@ resource "aws_iam_policy" "casey_backend" {
           "polly:SynthesizeSpeech"
         ]
         Resource = "*"
+      },
+      {
+        Sid    = "CloudWatchLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = "${aws_cloudwatch_log_group.casey_backend_logs.arn}:*"
       }
     ]
   })
