@@ -1,7 +1,7 @@
 /**
  * Interview backend: WebSocket signaling + WebRTC.
  * Receives client mic over WebRTC, runs STT -> LLM -> TTS, streams audio + visemes back over DataChannel.
- * WebRTC (wrtc) is required; the server will not start if it cannot load.
+ * WebRTC (@roamhq/wrtc) is required; the server will not start if it cannot load.
  */
 
 import express from 'express';
@@ -12,22 +12,22 @@ import { createStreamingSTT } from './stt.js';
 
 let RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, wrtcModule;
 try {
-  const imported = await import('wrtc');
+  const imported = await import('@roamhq/wrtc');
   // ESM interop: CJS module may be under .default
   wrtcModule = imported.default ?? imported;
   RTCPeerConnection = wrtcModule.RTCPeerConnection;
   RTCSessionDescription = wrtcModule.RTCSessionDescription;
   RTCIceCandidate = wrtcModule.RTCIceCandidate;
   if (typeof RTCPeerConnection !== 'function') {
-    throw new Error('wrtc did not export RTCPeerConnection correctly');
+    throw new Error('@roamhq/wrtc did not export RTCPeerConnection correctly');
   }
 } catch (e) {
-  console.error('[Backend] Failed to load WebRTC (wrtc). This is required for the interview connection.');
-  console.error('[Backend] Install with: npm install wrtc');
+  console.error('[Backend] Failed to load WebRTC (@roamhq/wrtc). This is required for the interview connection.');
+  console.error('[Backend] Install with: npm install @roamhq/wrtc');
   console.error('[Backend] Error:', e.message);
   process.exit(1);
 }
-console.log('[Backend] WebRTC (wrtc) loaded successfully');
+console.log('[Backend] WebRTC (@roamhq/wrtc) loaded successfully');
 
 const app = express();
 app.use(express.static('public'));
