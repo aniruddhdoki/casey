@@ -69,7 +69,7 @@ export function useStreamingPlayback(
 
       decodingInProgressRef.current = true;
       const buffer = pending.buffer.slice(pending.byteOffset, pending.byteOffset + pending.byteLength);
-      ctx.decodeAudioData(buffer)
+      ctx.decodeAudioData(buffer as ArrayBuffer)
         .then((decoded) => {
           if (nextStartTimeRef.current === 0) {
             console.log('[Frontend] --- Backend audio playback START ---');
@@ -116,7 +116,7 @@ export function useStreamingPlayback(
 
     decodingInProgressRef.current = true;
     const buffer = pending.buffer.slice(pending.byteOffset, pending.byteOffset + pending.byteLength);
-    ctx.decodeAudioData(buffer)
+    ctx.decodeAudioData(buffer as ArrayBuffer)
       .then((decoded) => {
         if (nextStartTimeRef.current === 0) {
           console.log('[Frontend] --- Backend audio playback START ---');
