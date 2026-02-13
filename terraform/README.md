@@ -9,21 +9,39 @@ Provisions IAM policy and attaches it to `casey_localdev_service` for backend de
 
 ## Configure AWS credentials for Terraform
 
-Use your IAM user credentials when running Terraform. Choose one:
+Use your admin IAM user credentials when running Terraform. Choose one:
 
-### Option A: AWS CLI default profile
+### Option A: .env file (recommended for local development)
+
+1. Copy `.env.example` to `.env` (if it exists) or create `.env` in the `terraform/` directory
+2. Edit `.env` and add your admin AWS credentials:
+   ```bash
+   AWS_REGION=us-east-1
+   AWS_ACCESS_KEY_ID=your_admin_access_key_id
+   AWS_SECRET_ACCESS_KEY=your_admin_secret_access_key
+   ```
+3. Source the file before running Terraform:
+   ```bash
+   source .env
+   terraform plan
+   terraform apply
+   ```
+
+**Note:** The `.env` file is gitignored and will not be committed to the repository.
+
+### Option B: AWS CLI default profile
 
 ```bash
 aws configure
-# Enter your IAM user's Access Key ID and Secret Access Key
+# Enter your admin IAM user's Access Key ID and Secret Access Key
 # Default region: us-east-1
 ```
 
-### Option B: Named profile
+### Option C: Named profile
 
 ```bash
 aws configure --profile casey-admin
-# Enter your IAM user's Access Key ID and Secret Access Key
+# Enter your admin IAM user's Access Key ID and Secret Access Key
 ```
 
 Then when running Terraform:
@@ -32,11 +50,11 @@ Then when running Terraform:
 export AWS_PROFILE=casey-admin
 ```
 
-### Option C: Environment variables
+### Option D: Environment variables
 
 ```bash
-export AWS_ACCESS_KEY_ID=your_access_key
-export AWS_SECRET_ACCESS_KEY=your_secret_key
+export AWS_ACCESS_KEY_ID=your_admin_access_key
+export AWS_SECRET_ACCESS_KEY=your_admin_secret_key
 export AWS_REGION=us-east-1
 ```
 
