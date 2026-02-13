@@ -3,6 +3,8 @@
  * Streams audio and visemes to client in real-time.
  */
 
+import { logRequest, logResponse, logError, logInfo } from './cloudwatch.js';
+
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 // Llama 4 Scout: use inference profile ARN (foundation model ID returns "Operation not allowed" / on-demand not supported)
 const BEDROCK_MODEL_ID = `amazon.nova-2-lite-v1:0`;
@@ -64,12 +66,23 @@ async function getLLMResponse(conversationHistory, userTranscript) {
     },
   ];
 
+  const startTime = Date.now();
+  const requestData = {
+    modelId: BEDROCK_MODEL_ID,
+    region: AWS_REGION,
+    messageCount: messages.length,
+    systemPromptLength: SYSTEM_PROMPT.length,
+    userTranscriptLength: userTranscript?.trim()?.length || 0,
+    maxTokens: 150,
+    temperature: 0.7,
+  };
+
   try {
-    console.log('[Agent] Bedrock request:', {
-      modelId: BEDROCK_MODEL_ID,
-      region: AWS_REGION,
-      messageCount: messages.length,
-    });
+    console.log('[Agent] Bedrock request:', requestData);
+    
+    // Log request
+    await logRequest('Bedrock', 'Converse', requestData);
+
     const response = await client.send(
       new ConverseCommand({
         modelId: BEDROCK_MODEL_ID,
@@ -88,7 +101,28 @@ async function getLLMResponse(conversationHistory, userTranscript) {
         ?.join('')
         ?.trim() || 'Okay.';
 
+    const duration = Date.now() - startTime;
+    const inputTokens = response.usage?.inputTokens || 0;
+    const outputTokens = response.usage?.outputTokens || 0;
+    const totalTokens = response.usage?.totalTokens || 0;
+
     console.log('[Agent] LLM output:', responseText);
+
+    // Log successful response
+    await logResponse('Bedrock', 'Converse', {
+      responseLength: responseText.length,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      durationMs: duration,
+      modelId: BEDROCK_MODEL_ID,
+    });
+
+    // Log response text (truncated)
+    await logInfo('Bedrock', 'ResponseText', {
+      responseText: responseText.substring(0, 500), // Log first 500 chars
+      fullLength: responseText.length,
+    });
 
     conversationHistory.push({
       role: 'user',
@@ -98,11 +132,20 @@ async function getLLMResponse(conversationHistory, userTranscript) {
 
     return responseText;
   } catch (e) {
+    const duration = Date.now() - startTime;
     console.error('[Agent] Bedrock error (message):', e.message);
     console.error('[Agent] Bedrock error (name):', e.name);
     console.error('[Agent] Bedrock error (code):', e.code);
     if (e.$metadata) console.error('[Agent] Bedrock error ($metadata):', JSON.stringify(e.$metadata, null, 2));
     console.error('[Agent] Bedrock error (full):', e);
+    
+    // Log error
+    await logError('Bedrock', 'Converse', e, {
+      durationMs: duration,
+      modelId: BEDROCK_MODEL_ID,
+      messageCount: messages.length,
+    });
+    
     return 'I apologize, I had trouble processing that.';
   }
 }
@@ -122,7 +165,25 @@ async function streamTTS(text, sendAudioChunk, sendViseme, sendEnd) {
   const polly = new PollyClient({ region: AWS_REGION });
 
   async function streamAudio() {
+    const startTime = Date.now();
+    let totalBytes = 0;
+    let chunkCount = 0;
+    
     try {
+      const requestData = {
+        engine: 'neural',
+        voiceId: POLLY_VOICE_ID,
+        outputFormat: 'mp3',
+        sampleRate: '24000',
+        textLength: text.length,
+      };
+
+      // Log request
+      await logRequest('Polly', 'SynthesizeSpeech', {
+        ...requestData,
+        purpose: 'audio',
+      });
+
       const response = await polly.send(
         new SynthesizeSpeechCommand({
           Engine: 'neural',
@@ -137,16 +198,58 @@ async function streamTTS(text, sendAudioChunk, sendViseme, sendEnd) {
       if (stream) {
         for await (const chunk of stream) {
           const buf = chunk instanceof Uint8Array ? Buffer.from(chunk) : Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-          if (buf.length > 0) sendAudioChunk(buf);
+          if (buf.length > 0) {
+            chunkCount++;
+            totalBytes += buf.length;
+            sendAudioChunk(buf);
+          }
         }
       }
+
+      const duration = Date.now() - startTime;
+      
+      // Log successful response
+      await logResponse('Polly', 'SynthesizeSpeech', {
+        purpose: 'audio',
+        audioBytes: totalBytes,
+        chunkCount,
+        durationMs: duration,
+        voiceId: POLLY_VOICE_ID,
+        textLength: text.length,
+      });
     } catch (e) {
+      const duration = Date.now() - startTime;
       console.error('[Agent] Polly audio failed:', e.message);
+      
+      // Log error
+      await logError('Polly', 'SynthesizeSpeech', e, {
+        purpose: 'audio',
+        durationMs: duration,
+        voiceId: POLLY_VOICE_ID,
+        textLength: text.length,
+      });
     }
   }
 
   async function streamVisemes() {
+    const startTime = Date.now();
+    let visemeCount = 0;
+    
     try {
+      const requestData = {
+        engine: 'neural',
+        voiceId: POLLY_VOICE_ID,
+        outputFormat: 'json',
+        speechMarkTypes: ['viseme'],
+        textLength: text.length,
+      };
+
+      // Log request
+      await logRequest('Polly', 'SynthesizeSpeech', {
+        ...requestData,
+        purpose: 'visemes',
+      });
+
       const response = await polly.send(
         new SynthesizeSpeechCommand({
           Engine: 'neural',
@@ -167,13 +270,34 @@ async function streamTTS(text, sendAudioChunk, sendViseme, sendEnd) {
           try {
             const mark = JSON.parse(line);
             if (mark.type === 'viseme' && mark.value != null) {
+              visemeCount++;
               sendViseme(mark.time, mark.value);
             }
           } catch (_) {}
         }
       }
+
+      const duration = Date.now() - startTime;
+      
+      // Log successful response
+      await logResponse('Polly', 'SynthesizeSpeech', {
+        purpose: 'visemes',
+        visemeCount,
+        durationMs: duration,
+        voiceId: POLLY_VOICE_ID,
+        textLength: text.length,
+      });
     } catch (e) {
+      const duration = Date.now() - startTime;
       console.error('[Agent] Polly visemes failed:', e.message);
+      
+      // Log error
+      await logError('Polly', 'SynthesizeSpeech', e, {
+        purpose: 'visemes',
+        durationMs: duration,
+        voiceId: POLLY_VOICE_ID,
+        textLength: text.length,
+      });
     }
   }
 
