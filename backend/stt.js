@@ -3,6 +3,8 @@
  * Option A: Stream audio to Transcribe in real-time as VAD feeds chunks.
  */
 
+import { logRequest, logResponse, logError, logInfo } from './cloudwatch.js';
+
 const DEFAULT_SAMPLE_RATE = 48000;
 const END_SENTINEL = Symbol('end');
 
@@ -39,6 +41,9 @@ export function createStreamingSTT(sampleRate = DEFAULT_SAMPLE_RATE) {
 
     const client = new TranscribeStreamingClient({ region });
 
+    let audioChunkCount = 0;
+    let totalAudioBytes = 0;
+
     async function* audioGenerator() {
       while (!ended || queue.length > 0) {
         if (queue.length > 0) {
@@ -46,6 +51,8 @@ export function createStreamingSTT(sampleRate = DEFAULT_SAMPLE_RATE) {
           if (item === END_SENTINEL) break;
           const chunk = Buffer.isBuffer(item) ? new Uint8Array(item) : new Uint8Array(item);
           if (chunk.length > 0) {
+            audioChunkCount++;
+            totalAudioBytes += chunk.length;
             yield { AudioEvent: { AudioChunk: chunk } };
           }
         } else {
@@ -55,6 +62,9 @@ export function createStreamingSTT(sampleRate = DEFAULT_SAMPLE_RATE) {
     }
 
     let fullTranscript = '';
+    let partialTranscriptCount = 0;
+    let finalTranscriptCount = 0;
+    const startTime = Date.now();
 
     try {
       const command = new StartStreamTranscriptionCommand({
@@ -64,24 +74,67 @@ export function createStreamingSTT(sampleRate = DEFAULT_SAMPLE_RATE) {
         AudioStream: audioGenerator(),
       });
 
+      // Log request
+      await logRequest('Transcribe', 'StartStreamTranscription', {
+        languageCode: 'en-US',
+        sampleRate,
+        mediaEncoding: 'pcm',
+      });
+
       const response = await client.send(command);
 
       if (response.TranscriptResultStream) {
         for await (const event of response.TranscriptResultStream) {
           if (event.TranscriptEvent?.Transcript?.Results) {
             for (const result of event.TranscriptEvent.Transcript.Results) {
-              if (!result.IsPartial && result.Alternatives?.[0]?.Transcript) {
+              if (result.IsPartial) {
+                partialTranscriptCount++;
+              } else if (result.Alternatives?.[0]?.Transcript) {
+                finalTranscriptCount++;
                 fullTranscript += result.Alternatives[0].Transcript;
               }
             }
           }
         }
       }
-    } catch (e) {
-      console.error('[STT] Transcribe streaming failed:', e.message);
-    }
 
-    return fullTranscript.trim();
+      const duration = Date.now() - startTime;
+      const transcript = fullTranscript.trim();
+
+      // Log successful response
+      await logResponse('Transcribe', 'StartStreamTranscription', {
+        transcriptLength: transcript.length,
+        partialResultCount: partialTranscriptCount,
+        finalResultCount: finalTranscriptCount,
+        audioChunkCount,
+        totalAudioBytes,
+        durationMs: duration,
+        sampleRate,
+      });
+
+      // Log transcript info
+      if (transcript) {
+        await logInfo('Transcribe', 'Transcript', {
+          transcript: transcript.substring(0, 500), // Log first 500 chars to avoid huge logs
+          fullLength: transcript.length,
+        });
+      }
+
+      return transcript;
+    } catch (e) {
+      const duration = Date.now() - startTime;
+      console.error('[STT] Transcribe streaming failed:', e.message);
+      
+      // Log error
+      await logError('Transcribe', 'StartStreamTranscription', e, {
+        durationMs: duration,
+        audioChunkCount,
+        totalAudioBytes,
+        sampleRate,
+      });
+
+      return fullTranscript.trim();
+    }
   }
 
   return {
@@ -103,6 +156,13 @@ export function createStreamingSTT(sampleRate = DEFAULT_SAMPLE_RATE) {
       }
       const text = await transcriptPromise;
       console.log('[STT] Transcript:', text || '(empty)');
+      
+      // Log session end
+      await logInfo('Transcribe', 'SessionEnd', {
+        transcriptLength: text?.length || 0,
+        hasTranscript: !!text,
+      });
+      
       return text;
     },
   };
