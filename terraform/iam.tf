@@ -1,7 +1,7 @@
-# IAM policy for casey backend: Transcribe, Bedrock, Polly
+# IAM policy for casey backend: Transcribe, Bedrock, Polly, CloudWatch Logs
 resource "aws_iam_policy" "casey_backend" {
   name        = "casey-backend-ai"
-  description = "Allows casey backend to use Transcribe, Bedrock, and Polly"
+  description = "Allows casey backend to use Transcribe, Bedrock, Polly, and CloudWatch Logs"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -32,13 +32,21 @@ resource "aws_iam_policy" "casey_backend" {
         Resource = "*"
       },
       {
-        Sid    = "CloudWatchLogs"
+        Sid    = "CloudWatchLogsDescribe"
+        Effect = "Allow"
+        Action = [
+          "logs:DescribeLogGroups"
+        ]
+        Resource = "*"
+        Comment = "DescribeLogGroups requires broader scope when using prefix filters"
+      },
+      {
+        Sid    = "CloudWatchLogsManage"
         Effect = "Allow"
         Action = [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents",
-          "logs:DescribeLogGroups",
           "logs:DescribeLogStreams"
         ]
         Resource = [
