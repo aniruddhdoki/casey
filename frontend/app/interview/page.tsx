@@ -375,6 +375,9 @@ function Avatar(
         }
     });
 
+    // Cache for binary search optimization - tracks last found viseme index
+    const lastVisemeIndexRef = useRef(0);
+
     useFrame((state) => {
         const headDict = headMesh?.morphTargetDictionary;
         const teethDict = teethMesh?.morphTargetDictionary;
@@ -415,38 +418,105 @@ function Avatar(
                 ? currentAudioTimeMs != null && durationMs > 0 && currentAudioTimeMs >= durationMs
                 : !!(audio && (audio.paused || audio.ended));
 
-        if (currentAudioTimeMs != null && speechMarksData?.length) {
-            if (isPaused) {
+        // Handle paused/ended state
+        if (isPaused || currentAudioTimeMs === null) {
+            if (isPaused && speechMarksData?.length) {
                 setAnimation('Idle');
-                Object.values(corresponding).forEach((name) => applyViseme(name, 0));
-                return;
             }
+            // Reset all visemes to neutral when paused or no audio
             Object.values(corresponding).forEach((name) => applyViseme(name, 0));
-            for (let i = 0; i < speechMarksData.length; i++) {
-                const viseme = speechMarksData[i];
+            lastVisemeIndexRef.current = 0;
+            return;
+        }
+
+        // Process visemes for streaming audio
+        if (speechMarksData?.length && currentAudioTimeMs >= 0) {
+            const visemes = speechMarksData;
+            let currentVisemeIndex = -1;
+
+            // Optimized search: start from last known position (most visemes are sequential)
+            // This handles streaming visemes efficiently as they arrive
+            let searchStart = Math.max(0, lastVisemeIndexRef.current - 1);
+            
+            // Forward search from cached position (common case: sequential playback)
+            for (let i = searchStart; i < visemes.length; i++) {
+                const viseme = visemes[i];
                 const startTime = viseme.time;
-                const endTime = speechMarksData[i + 1] ? speechMarksData[i + 1].time : durationMs;
+                const endTime = i + 1 < visemes.length ? visemes[i + 1].time : durationMs;
+                
                 if (currentAudioTimeMs >= startTime && currentAudioTimeMs < endTime) {
-                    const visemeCode = viseme.value;
-                    const morphTargetName = corresponding[visemeCode];
-                    if (morphTargetName) {
-                        applyViseme(morphTargetName, 1);
-                    } else {
-                        // Fallback: log unmapped viseme code and use neutral position
-                        console.warn(`[Avatar] Unmapped viseme code: "${visemeCode}". Using neutral position.`);
-                        // Use a neutral viseme as fallback (viseme_PP is typically neutral/closed)
-                        applyViseme('viseme_PP', 0.5);
+                    currentVisemeIndex = i;
+                    break;
+                }
+                // If we've passed this viseme, continue searching forward
+                if (currentAudioTimeMs < startTime) {
+                    // Time hasn't reached this viseme yet, check previous one
+                    if (i > 0) {
+                        const prevViseme = visemes[i - 1];
+                        const prevEndTime = viseme.time;
+                        if (currentAudioTimeMs >= prevViseme.time && currentAudioTimeMs < prevEndTime) {
+                            currentVisemeIndex = i - 1;
+                        }
                     }
                     break;
                 }
             }
+
+            // If not found forward, search backward (handles seeking/rewinding)
+            if (currentVisemeIndex === -1 && searchStart > 0) {
+                for (let i = searchStart - 1; i >= 0; i--) {
+                    const viseme = visemes[i];
+                    const startTime = viseme.time;
+                    const endTime = i + 1 < visemes.length ? visemes[i + 1].time : durationMs;
+                    
+                    if (currentAudioTimeMs >= startTime && currentAudioTimeMs < endTime) {
+                        currentVisemeIndex = i;
+                        break;
+                    }
+                    if (currentAudioTimeMs > endTime) {
+                        // Past this viseme, stop searching backward
+                        break;
+                    }
+                }
+            }
+
+            // Apply the current viseme
+            if (currentVisemeIndex >= 0 && currentVisemeIndex < visemes.length) {
+                // Reset all visemes first
+                Object.values(corresponding).forEach((name) => applyViseme(name, 0));
+                
+                const viseme = visemes[currentVisemeIndex];
+                const visemeCode = viseme.value;
+                const morphTargetName = corresponding[visemeCode];
+                
+                if (morphTargetName) {
+                    applyViseme(morphTargetName, 1);
+                    lastVisemeIndexRef.current = currentVisemeIndex;
+                } else {
+                    // Fallback: log unmapped viseme code and use neutral position
+                    console.warn(`[Avatar] Unmapped viseme code: "${visemeCode}". Using neutral position.`);
+                    applyViseme('viseme_PP', 0.5);
+                }
+            } else {
+                // No matching viseme found - reset to neutral
+                // This can happen if visemes haven't arrived yet (streaming) or audio is before first viseme
+                Object.values(corresponding).forEach((name) => applyViseme(name, 0));
+                // Reset cache if we're before the first viseme
+                if (visemes.length > 0 && currentAudioTimeMs < visemes[0].time) {
+                    lastVisemeIndexRef.current = 0;
+                }
+            }
         } else if (VISEME_TEST_ENABLED && headMorphNames.length > 0) {
+            // Test mode: cycle through visemes
             const sequence = headMorphNames.some((n) => n.startsWith('viseme_'))
                 ? Object.values(corresponding)
                 : headMorphNames;
             const index = Math.floor(state.clock.elapsedTime / VISEME_STEP_DURATION) % sequence.length;
             const currentMorphName = sequence[index];
             sequence.forEach((name) => applyViseme(name, name === currentMorphName ? 1 : 0));
+        } else {
+            // No visemes available yet (still streaming) - neutral position
+            Object.values(corresponding).forEach((name) => applyViseme(name, 0));
         }
     });
 

@@ -234,6 +234,7 @@ async function streamTTS(text, sendAudioChunk, sendViseme, sendEnd) {
   async function streamVisemes() {
     const startTime = Date.now();
     let visemeCount = 0;
+    let buffer = '';
     
     try {
       const requestData = {
@@ -262,18 +263,48 @@ async function streamTTS(text, sendAudioChunk, sendViseme, sendEnd) {
       );
       const stream = response.AudioStream;
       if (stream) {
-        let body = '';
+        // Process visemes as they stream in (not buffering entire response)
+        // Polly returns newline-delimited JSON, so we process line by line
         for await (const chunk of stream) {
-          body += typeof chunk === 'string' ? chunk : chunk.toString();
+          const chunkStr = typeof chunk === 'string' ? chunk : chunk.toString();
+          buffer += chunkStr;
+          
+          // Process complete lines from buffer
+          const lines = buffer.split('\n');
+          // Keep incomplete line in buffer
+          buffer = lines.pop() || '';
+          
+          // Process each complete line immediately
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const mark = JSON.parse(line);
+              if (mark.type === 'viseme' && mark.value != null && mark.time != null) {
+                visemeCount++;
+                // Send viseme immediately as it's parsed (streaming)
+                sendViseme(mark.time, mark.value);
+                if (visemeCount <= 3) {
+                  console.log(`[Agent] Viseme ${visemeCount} sent:`, { time: mark.time, value: mark.value });
+                }
+              }
+            } catch (parseError) {
+              // Skip malformed JSON lines (shouldn't happen with Polly, but be defensive)
+              console.warn('[Agent] Failed to parse viseme line:', line.substring(0, 50));
+            }
+          }
         }
-        for (const line of body.split('\n').filter(Boolean)) {
+        
+        // Process any remaining data in buffer
+        if (buffer.trim()) {
           try {
-            const mark = JSON.parse(line);
-            if (mark.type === 'viseme' && mark.value != null) {
+            const mark = JSON.parse(buffer);
+            if (mark.type === 'viseme' && mark.value != null && mark.time != null) {
               visemeCount++;
               sendViseme(mark.time, mark.value);
             }
-          } catch (_) {}
+          } catch (_) {
+            // Last chunk might be incomplete, ignore parse errors
+          }
         }
       }
 
@@ -287,6 +318,8 @@ async function streamTTS(text, sendAudioChunk, sendViseme, sendEnd) {
         voiceId: POLLY_VOICE_ID,
         textLength: text.length,
       });
+      
+      console.log(`[Agent] Viseme streaming complete: ${visemeCount} visemes sent in ${duration}ms`);
     } catch (e) {
       const duration = Date.now() - startTime;
       console.error('[Agent] Polly visemes failed:', e.message);
