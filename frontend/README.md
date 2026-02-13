@@ -24,7 +24,7 @@ The interview flow uses WebRTC for full-duplex audio and a DataChannel for strea
    ```bash
    cd backend && npm install && npm run dev
    ```
-   Backend runs on **http://localhost:3001** (WebSocket: `ws://localhost:3001/ws`). Set `OPENAI_API_KEY` in the environment for real STT/LLM/TTS; without it you still get a viseme stream for testing.
+   Backend runs on **http://localhost:3001** (WebSocket: `ws://localhost:3001/ws`). Set AWS credentials in the backend environment for real STT (Transcribe), LLM (Bedrock), and TTS (Polly); without them you get a viseme test only.
 
 2. **Run the frontend**: `npm run dev` and open [http://localhost:3000/interview](http://localhost:3000/interview).
 

@@ -128,17 +128,32 @@ export function useInterviewWebRTC() {
             if (typeof event.data === 'string') {
               try {
                 const payload = JSON.parse(event.data);
-                console.log('[Frontend WebRTC] DataChannel text:', payload);
                 if (payload.type === 'viseme') {
-                  setState((s) => ({
-                    ...s,
-                    streamedSpeechMarks: [...s.streamedSpeechMarks, { time: payload.time, value: payload.value }],
-                  }));
+                  // Process viseme events as they stream in
+                  // Visemes arrive in chronological order from Polly, so we can append directly
+                  setState((s) => {
+                    const newViseme = { time: payload.time, value: payload.value };
+                    const updatedMarks = [...s.streamedSpeechMarks, newViseme];
+                    
+                    // Log first few visemes for debugging
+                    if (updatedMarks.length <= 3) {
+                      console.log('[Frontend WebRTC] Viseme received:', newViseme, `(total: ${updatedMarks.length})`);
+                    }
+                    
+                    return {
+                      ...s,
+                      streamedSpeechMarks: updatedMarks,
+                    };
+                  });
                 } else if (payload.type === 'end') {
                   console.log('[Frontend WebRTC] Stream end received');
                   setState((s) => ({ ...s, streamEnded: true }));
+                } else {
+                  console.log('[Frontend WebRTC] DataChannel text:', payload);
                 }
-              } catch (_) {}
+              } catch (e) {
+                console.warn('[Frontend WebRTC] Failed to parse DataChannel message:', e);
+              }
             } else {
               const data = event.data;
               const p =

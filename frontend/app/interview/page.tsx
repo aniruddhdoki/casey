@@ -131,21 +131,100 @@ export default function Interview() {
     );
 }
 
+/**
+ * AWS Polly viseme codes -> avatar morph targets compatibility mapping
+ * 
+ * Maps all AWS Polly Neural viseme codes to corresponding avatar morph targets.
+ * Based on AWS Polly viseme documentation: https://docs.aws.amazon.com/polly/latest/dg/viseme.html
+ * 
+ * Mapping strategy:
+ * - Consonants with similar mouth shapes are grouped (e.g., p/b/f -> viseme_PP)
+ * - Vowels map to their closest phonetic viseme targets
+ * - Unmapped codes fall back to the closest similar viseme
+ */
 const corresponding: Record<string, string> = {
+    // Plosives (bilabial) - closed lips
     'p': 'viseme_PP',
+    'b': 'viseme_PP',
+    
+    // Plosives (alveolar/dental) - tongue tip
     't': 'viseme_DD',
-    'S': 'viseme_SH',
-    'i': 'viseme_IH',
-    'u': 'viseme_UH',
-    'a': 'viseme_AA',
-    '@': 'viseme_AE',
-    'e': 'viseme_EH',
-    'E': 'viseme_EY',
-    'o': 'viseme_OW',
+    'd': 'viseme_DD',
+    'k': 'viseme_DD',  // velar plosive, similar mouth shape
+    'g': 'viseme_DD',  // velar plosive
+    
+    // Fricatives (labiodental) - lip-teeth
+    'f': 'viseme_PP',  // similar to p/b but with teeth
+    'v': 'viseme_PP',  // voiced fricative
+    
+    // Fricatives (dental/interdental)
+    'th': 'viseme_DD',  // tongue between teeth
+    'TH': 'viseme_DD',  // voiced th
+    
+    // Fricatives (alveolar) - tongue tip
+    's': 'viseme_SH',
+    'z': 'viseme_SH',
+    
+    // Fricatives (post-alveolar/palatal) - tongue back
+    'S': 'viseme_SH',  // sh sound
+    'sh': 'viseme_SH',
+    'Z': 'viseme_SH',  // zh sound
+    
+    // Affricates (post-alveolar)
+    'tS': 'viseme_SH',  // ch sound
+    'ch': 'viseme_SH',
+    'dZ': 'viseme_SH',  // j sound
+    
+    // Nasals
+    'm': 'viseme_PP',  // bilabial nasal
+    'n': 'viseme_DD',  // alveolar nasal
+    'ng': 'viseme_DD', // velar nasal
+    
+    // Liquids
+    'l': 'viseme_DD',  // lateral approximant
+    'r': 'viseme_DD',  // alveolar approximant
+    
+    // Glides/semivowels
+    'w': 'viseme_UH',  // rounded lips
+    'y': 'viseme_IH',  // palatal approximant
+    
+    // Glottal
+    'hh': 'viseme_EH', // h sound, neutral mouth
+    
+    // Vowels - Close front
+    'i': 'viseme_IH',  // close front unrounded
+    'I': 'viseme_IH',  // near-close near-front
+    
+    // Vowels - Close-mid front
+    'e': 'viseme_EH',  // close-mid front unrounded
+    'E': 'viseme_EY',  // close-mid front unrounded (diphthong)
+    
+    // Vowels - Open-mid front
+    '@': 'viseme_AE',  // near-open front unrounded
+    '^': 'viseme_AE',  // open-mid central
+    
+    // Vowels - Open front
+    'a': 'viseme_AA',  // open front unrounded
+    'A': 'viseme_AA',  // open back unrounded
+    
+    // Vowels - Open-mid back
+    'O': 'viseme_OW',  // open-mid back rounded
+    
+    // Vowels - Close-mid back
+    'o': 'viseme_OW',  // close-mid back rounded
+    
+    // Vowels - Close back
+    'u': 'viseme_UH',  // close back rounded
+    'U': 'viseme_UH',  // near-close near-back
+    
+    // Silence/rest
+    'sil': 'viseme_PP',  // neutral position
+    '': 'viseme_PP',     // empty/rest
 };
 
 const VISEME_TEST_ENABLED = false;  // Set true to run looping viseme test sequence.
-const VISEME_TEST_SEQUENCE = ['a', 'i', 'u', 'e', 'o', 'p', 't', 'S'];
+// Test sequence includes various viseme types: vowels, plosives, fricatives
+const VISEME_TEST_SEQUENCE = ['a', 'i', 'u', 'e', 'o', 'p', 't', 'S', 'k', 'f', 'm', 'l'];
 const VISEME_STEP_DURATION = 0.4;
 
 function findMeshByName(root: Object3D, pattern: RegExp, exclude?: RegExp): SkinnedMesh | null {
@@ -296,6 +375,9 @@ function Avatar(
         }
     });
 
+    // Cache for binary search optimization - tracks last found viseme index
+    const lastVisemeIndexRef = useRef(0);
+
     useFrame((state) => {
         const headDict = headMesh?.morphTargetDictionary;
         const teethDict = teethMesh?.morphTargetDictionary;
@@ -336,30 +418,105 @@ function Avatar(
                 ? currentAudioTimeMs != null && durationMs > 0 && currentAudioTimeMs >= durationMs
                 : !!(audio && (audio.paused || audio.ended));
 
-        if (currentAudioTimeMs != null && speechMarksData?.length) {
-            if (isPaused) {
+        // Handle paused/ended state
+        if (isPaused || currentAudioTimeMs === null) {
+            if (isPaused && speechMarksData?.length) {
                 setAnimation('Idle');
-                Object.values(corresponding).forEach((name) => applyViseme(name, 0));
-                return;
             }
+            // Reset all visemes to neutral when paused or no audio
             Object.values(corresponding).forEach((name) => applyViseme(name, 0));
-            for (let i = 0; i < speechMarksData.length; i++) {
-                const viseme = speechMarksData[i];
+            lastVisemeIndexRef.current = 0;
+            return;
+        }
+
+        // Process visemes for streaming audio
+        if (speechMarksData?.length && currentAudioTimeMs >= 0) {
+            const visemes = speechMarksData;
+            let currentVisemeIndex = -1;
+
+            // Optimized search: start from last known position (most visemes are sequential)
+            // This handles streaming visemes efficiently as they arrive
+            let searchStart = Math.max(0, lastVisemeIndexRef.current - 1);
+            
+            // Forward search from cached position (common case: sequential playback)
+            for (let i = searchStart; i < visemes.length; i++) {
+                const viseme = visemes[i];
                 const startTime = viseme.time;
-                const endTime = speechMarksData[i + 1] ? speechMarksData[i + 1].time : durationMs;
+                const endTime = i + 1 < visemes.length ? visemes[i + 1].time : durationMs;
+                
                 if (currentAudioTimeMs >= startTime && currentAudioTimeMs < endTime) {
-                    const morphTargetName = corresponding[viseme.value];
-                    if (morphTargetName) applyViseme(morphTargetName, 1);
+                    currentVisemeIndex = i;
+                    break;
+                }
+                // If we've passed this viseme, continue searching forward
+                if (currentAudioTimeMs < startTime) {
+                    // Time hasn't reached this viseme yet, check previous one
+                    if (i > 0) {
+                        const prevViseme = visemes[i - 1];
+                        const prevEndTime = viseme.time;
+                        if (currentAudioTimeMs >= prevViseme.time && currentAudioTimeMs < prevEndTime) {
+                            currentVisemeIndex = i - 1;
+                        }
+                    }
                     break;
                 }
             }
+
+            // If not found forward, search backward (handles seeking/rewinding)
+            if (currentVisemeIndex === -1 && searchStart > 0) {
+                for (let i = searchStart - 1; i >= 0; i--) {
+                    const viseme = visemes[i];
+                    const startTime = viseme.time;
+                    const endTime = i + 1 < visemes.length ? visemes[i + 1].time : durationMs;
+                    
+                    if (currentAudioTimeMs >= startTime && currentAudioTimeMs < endTime) {
+                        currentVisemeIndex = i;
+                        break;
+                    }
+                    if (currentAudioTimeMs > endTime) {
+                        // Past this viseme, stop searching backward
+                        break;
+                    }
+                }
+            }
+
+            // Apply the current viseme
+            if (currentVisemeIndex >= 0 && currentVisemeIndex < visemes.length) {
+                // Reset all visemes first
+                Object.values(corresponding).forEach((name) => applyViseme(name, 0));
+                
+                const viseme = visemes[currentVisemeIndex];
+                const visemeCode = viseme.value;
+                const morphTargetName = corresponding[visemeCode];
+                
+                if (morphTargetName) {
+                    applyViseme(morphTargetName, 1);
+                    lastVisemeIndexRef.current = currentVisemeIndex;
+                } else {
+                    // Fallback: log unmapped viseme code and use neutral position
+                    console.warn(`[Avatar] Unmapped viseme code: "${visemeCode}". Using neutral position.`);
+                    applyViseme('viseme_PP', 0.5);
+                }
+            } else {
+                // No matching viseme found - reset to neutral
+                // This can happen if visemes haven't arrived yet (streaming) or audio is before first viseme
+                Object.values(corresponding).forEach((name) => applyViseme(name, 0));
+                // Reset cache if we're before the first viseme
+                if (visemes.length > 0 && currentAudioTimeMs < visemes[0].time) {
+                    lastVisemeIndexRef.current = 0;
+                }
+            }
         } else if (VISEME_TEST_ENABLED && headMorphNames.length > 0) {
+            // Test mode: cycle through visemes
             const sequence = headMorphNames.some((n) => n.startsWith('viseme_'))
                 ? Object.values(corresponding)
                 : headMorphNames;
             const index = Math.floor(state.clock.elapsedTime / VISEME_STEP_DURATION) % sequence.length;
             const currentMorphName = sequence[index];
             sequence.forEach((name) => applyViseme(name, name === currentMorphName ? 1 : 0));
+        } else {
+            // No visemes available yet (still streaming) - neutral position
+            Object.values(corresponding).forEach((name) => applyViseme(name, 0));
         }
     });
 

@@ -1,81 +1,169 @@
 /**
- * Speech-to-text: build WAV from PCM chunks and call OpenAI Whisper.
+ * Speech-to-text: Amazon Transcribe streaming.
+ * Option A: Stream audio to Transcribe in real-time as VAD feeds chunks.
  */
 
+import { logRequest, logResponse, logError, logInfo } from './cloudwatch.js';
+
 const DEFAULT_SAMPLE_RATE = 48000;
-const BITS_PER_SAMPLE = 16;
-const NUM_CHANNELS = 1;
+const END_SENTINEL = Symbol('end');
 
-function createWavBuffer(chunks, sampleRate = DEFAULT_SAMPLE_RATE) {
-  let totalBytes = 0;
-  for (const c of chunks) {
-    const d = c.data ?? c;
-    const len = Buffer.isBuffer(d) ? d.length : (d?.byteLength ?? 0);
-    if (!len) continue;
-    totalBytes += len;
-  }
-  if (totalBytes === 0) return null;
-
-  const header = Buffer.alloc(44);
-  const dataLength = totalBytes;
-  const byteRate = sampleRate * NUM_CHANNELS * (BITS_PER_SAMPLE / 8);
-  const blockAlign = NUM_CHANNELS * (BITS_PER_SAMPLE / 8);
-
-  header.write('RIFF', 0);
-  header.writeUInt32LE(36 + dataLength, 4);
-  header.write('WAVE', 8);
-  header.write('fmt ', 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(NUM_CHANNELS, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(byteRate, 28);
-  header.writeUInt16LE(blockAlign, 32);
-  header.writeUInt16LE(BITS_PER_SAMPLE, 34);
-  header.write('data', 36);
-  header.writeUInt32LE(dataLength, 40);
-
-  const out = Buffer.alloc(44 + dataLength);
-  header.copy(out, 0);
-  let offset = 44;
-  for (const c of chunks) {
-    const d = c.data ?? c;
-    const buf = Buffer.isBuffer(d) ? d : Buffer.from(d);
-    buf.copy(out, offset);
-    offset += buf.length;
-  }
-  return out;
+function hasAWSCredentials() {
+  return !!(process.env.AWS_ACCESS_KEY_ID || process.env.AWS_PROFILE || process.env.AWS_ROLE_ARN);
 }
 
-export async function runSTT(utteranceChunks, sampleRate = DEFAULT_SAMPLE_RATE) {
-  if (!utteranceChunks?.length) {
-    console.log('[STT] No audio chunks');
-    return '';
+/**
+ * Create a streaming STT session. Feed audio via feed(), call end() to get transcript.
+ * @param {number} sampleRate - PCM sample rate (8000, 16000, 44100, or 48000)
+ * @returns {{ feed: (buf: Buffer) => void, end: () => Promise<string> }}
+ */
+export function createStreamingSTT(sampleRate = DEFAULT_SAMPLE_RATE) {
+  if (!hasAWSCredentials()) {
+    return {
+      feed() {},
+      async end() {
+        console.log('[STT] No AWS credentials, skipping Transcribe');
+        return '';
+      },
+    };
   }
-  const wav = createWavBuffer(utteranceChunks, sampleRate);
-  if (!wav || wav.length <= 44) {
-    console.log('[STT] WAV too short');
-    return '';
+
+  const queue = [];
+  let ended = false;
+  let transcriptPromise = null;
+  let transcriptResolve = null;
+
+  async function runTranscribe() {
+    const region = process.env.AWS_REGION || 'us-east-1';
+    const { TranscribeStreamingClient, StartStreamTranscriptionCommand } = await import(
+      '@aws-sdk/client-transcribe-streaming'
+    );
+
+    const client = new TranscribeStreamingClient({ region });
+
+    let audioChunkCount = 0;
+    let totalAudioBytes = 0;
+
+    async function* audioGenerator() {
+      while (!ended || queue.length > 0) {
+        if (queue.length > 0) {
+          const item = queue.shift();
+          if (item === END_SENTINEL) break;
+          const chunk = Buffer.isBuffer(item) ? new Uint8Array(item) : new Uint8Array(item);
+          if (chunk.length > 0) {
+            audioChunkCount++;
+            totalAudioBytes += chunk.length;
+            yield { AudioEvent: { AudioChunk: chunk } };
+          }
+        } else {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+      }
+    }
+
+    let fullTranscript = '';
+    let partialTranscriptCount = 0;
+    let finalTranscriptCount = 0;
+    const startTime = Date.now();
+
+    try {
+      const command = new StartStreamTranscriptionCommand({
+        LanguageCode: 'en-US',
+        MediaSampleRateHertz: sampleRate,
+        MediaEncoding: 'pcm',
+        AudioStream: audioGenerator(),
+      });
+
+      // Log request
+      await logRequest('Transcribe', 'StartStreamTranscription', {
+        languageCode: 'en-US',
+        sampleRate,
+        mediaEncoding: 'pcm',
+      });
+
+      const response = await client.send(command);
+
+      if (response.TranscriptResultStream) {
+        for await (const event of response.TranscriptResultStream) {
+          if (event.TranscriptEvent?.Transcript?.Results) {
+            for (const result of event.TranscriptEvent.Transcript.Results) {
+              if (result.IsPartial) {
+                partialTranscriptCount++;
+              } else if (result.Alternatives?.[0]?.Transcript) {
+                finalTranscriptCount++;
+                fullTranscript += result.Alternatives[0].Transcript;
+              }
+            }
+          }
+        }
+      }
+
+      const duration = Date.now() - startTime;
+      const transcript = fullTranscript.trim();
+
+      // Log successful response
+      await logResponse('Transcribe', 'StartStreamTranscription', {
+        transcriptLength: transcript.length,
+        partialResultCount: partialTranscriptCount,
+        finalResultCount: finalTranscriptCount,
+        audioChunkCount,
+        totalAudioBytes,
+        durationMs: duration,
+        sampleRate,
+      });
+
+      // Log transcript info
+      if (transcript) {
+        await logInfo('Transcribe', 'Transcript', {
+          transcript: transcript.substring(0, 500), // Log first 500 chars to avoid huge logs
+          fullLength: transcript.length,
+        });
+      }
+
+      return transcript;
+    } catch (e) {
+      const duration = Date.now() - startTime;
+      console.error('[STT] Transcribe streaming failed:', e.message);
+      
+      // Log error
+      await logError('Transcribe', 'StartStreamTranscription', e, {
+        durationMs: duration,
+        audioChunkCount,
+        totalAudioBytes,
+        sampleRate,
+      });
+
+      return fullTranscript.trim();
+    }
   }
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    console.log('[STT] No OPENAI_API_KEY, skipping');
-    return '';
-  }
-  try {
-    const openaiModule = await import('openai');
-    const OpenAI = openaiModule.default;
-    const openai = new OpenAI({ apiKey });
-    const file = await openaiModule.toFile(wav, 'audio.wav', { type: 'audio/wav' });
-    const transcription = await openai.audio.transcriptions.create({
-      file,
-      model: 'whisper-1',
-    });
-    const text = (transcription?.text ?? '').trim();
-    console.log('[STT] Transcript:', text || '(empty)');
-    return text;
-  } catch (e) {
-    console.error('[STT] Whisper failed:', e.message);
-    return '';
-  }
+
+  return {
+    feed(buf) {
+      if (ended) return;
+      if (!transcriptPromise) {
+        transcriptPromise = runTranscribe();
+      }
+      if (buf && (Buffer.isBuffer(buf) ? buf.length : buf?.byteLength)) {
+        queue.push(buf);
+      }
+    },
+
+    async end() {
+      ended = true;
+      queue.push(END_SENTINEL);
+      if (!transcriptPromise) {
+        transcriptPromise = runTranscribe();
+      }
+      const text = await transcriptPromise;
+      console.log('[STT] Transcript:', text || '(empty)');
+      
+      // Log session end
+      await logInfo('Transcribe', 'SessionEnd', {
+        transcriptLength: text?.length || 0,
+        hasTranscript: !!text,
+      });
+      
+      return text;
+    },
+  };
 }

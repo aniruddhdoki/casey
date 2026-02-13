@@ -8,7 +8,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { runAgent } from './agent.js';
 import { createVAD } from './vad.js';
-import { runSTT } from './stt.js';
+import { createStreamingSTT } from './stt.js';
 
 let RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, wrtcModule;
 try {
@@ -38,21 +38,6 @@ const server = app.listen(PORT, () => {
 });
 
 const wss = new WebSocketServer({ server, path: '/ws' });
-
-// Viseme codes that match frontend Avatar's corresponding map
-const VISEME_CODES = ['p', 't', 'S', 'i', 'u', 'a', '@', 'e', 'E', 'o'];
-
-function randomViseme() {
-  return VISEME_CODES[Math.floor(Math.random() * VISEME_CODES.length)];
-}
-
-function generateRandomVisemeSequence(durationMs, intervalMs = 80) {
-  const out = [];
-  for (let t = 0; t < durationMs; t += intervalMs) {
-    out.push({ time: t, value: randomViseme() });
-  }
-  return out;
-}
 
 wss.on('connection', (ws, req) => {
   console.log('[Backend] --- Data intake: WebSocket connection opened ---');
@@ -87,7 +72,6 @@ wss.on('connection', (ws, req) => {
           dataChannel.send(JSON.stringify({ type: 'end' }));
         }
       },
-      generateRandomVisemeSequence,
     };
   }
 
@@ -95,24 +79,29 @@ wss.on('connection', (ws, req) => {
     if (vadStarted || !audioSink || !dataChannel || dataChannel.readyState !== 'open') return;
     vadStarted = true;
     console.log('[Backend] --- VAD: starting (wait for user to speak, then 3s silence) ---');
-    const vad = createVAD(async (utteranceChunks, sampleRate) => {
-      console.log('[Backend] VAD triggered — running STT on utterance...');
-      let userTranscript = '';
-      try {
-        userTranscript = await runSTT(utteranceChunks, sampleRate);
-      } catch (e) {
-        console.error('[Backend] STT error:', e.message);
-      }
-      console.log('[Backend] Starting agent with transcript and history...');
-      runAgent(getAgentOptions(userTranscript))
-        .then(() => {
-          vad.reset();
-        })
-        .catch((err) => {
-          console.error('[Backend] Agent error:', err);
-          vad.reset();
-        });
-    });
+    let currentSTT = createStreamingSTT(48000);
+    const vad = createVAD(
+      async (utteranceChunks, sampleRate) => {
+        console.log('[Backend] VAD triggered — getting transcript from streaming STT...');
+        let userTranscript = '';
+        try {
+          userTranscript = await currentSTT.end();
+        } catch (e) {
+          console.error('[Backend] STT error:', e.message);
+        }
+        currentSTT = createStreamingSTT(48000); // new session for next round
+        console.log('[Backend] Starting agent with transcript and history...');
+        runAgent(getAgentOptions(userTranscript))
+          .then(() => {
+            vad.reset();
+          })
+          .catch((err) => {
+            console.error('[Backend] Agent error:', err);
+            vad.reset();
+          });
+      },
+      { onAudioChunk: (buf) => currentSTT.feed(buf) }
+    );
     audioSink.ondata = (data) => {
       vad.feed(data);
     };

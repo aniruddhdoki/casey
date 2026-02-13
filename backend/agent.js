@@ -1,10 +1,24 @@
 /**
- * Agent: STT transcript + conversation history -> LLM -> TTS. Streams audio to client.
+ * Agent: STT transcript + conversation history -> Bedrock LLM -> Polly TTS.
+ * Streams audio and visemes to client in real-time.
  */
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+import { logRequest, logResponse, logError, logInfo } from './cloudwatch.js';
+
+const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+// Llama 4 Scout: use inference profile ARN (foundation model ID returns "Operation not allowed" / on-demand not supported)
+const BEDROCK_MODEL_ID = `amazon.nova-2-lite-v1:0`;
+const POLLY_VOICE_ID = 'Joanna';
 const SYSTEM_PROMPT =
   'You are an interview coach. Respond concisely and naturally. One or two short sentences per turn.';
+
+function hasAWSCredentials() {
+  return !!(
+    process.env.AWS_ACCESS_KEY_ID ||
+    process.env.AWS_PROFILE ||
+    process.env.AWS_ROLE_ARN
+  );
+}
 
 export async function runAgent({
   conversationHistory,
@@ -12,103 +26,326 @@ export async function runAgent({
   sendAudioChunk,
   sendViseme,
   sendEnd,
-  generateRandomVisemeSequence,
 }) {
   console.log('[Agent] --- Step 1: Agent started ---');
   console.log('[Agent] User transcript:', userTranscript || '(empty)');
   console.log('[Agent] History length:', conversationHistory?.length ?? 0);
-  console.log('[Agent] OPENAI_API_KEY present:', !!OPENAI_API_KEY);
+  console.log('[Agent] AWS credentials present:', hasAWSCredentials());
 
-  const text = OPENAI_API_KEY
+  const text = hasAWSCredentials()
     ? await getLLMResponse(conversationHistory, userTranscript)
     : 'Hello. This is a test response from the interview platform.';
 
   console.log('[Agent] Response to speak:', text);
 
-  if (OPENAI_API_KEY) {
-    await streamTTS(text, sendAudioChunk, sendViseme, sendEnd, generateRandomVisemeSequence);
+  if (hasAWSCredentials()) {
+    await streamTTS(text, sendAudioChunk, sendViseme, sendEnd);
   } else {
-    await sendTestResponse(sendViseme, sendEnd, generateRandomVisemeSequence);
+    await sendTestResponse(sendViseme, sendEnd);
   }
 }
 
 async function getLLMResponse(conversationHistory, userTranscript) {
-  if (!OPENAI_API_KEY) return 'Test response.';
+  if (!hasAWSCredentials()) return 'Test response.';
 
-  console.log('[Agent] --- Step 2: Response generation (LLM) ---');
-  const OpenAI = (await import('openai')).default;
-  const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+  console.log('[Agent] --- Step 2: Response generation (Bedrock) ---');
+  const { BedrockRuntimeClient, ConverseCommand } = await import(
+    '@aws-sdk/client-bedrock-runtime'
+  );
+
+  const client = new BedrockRuntimeClient({ region: AWS_REGION });
 
   const messages = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...(conversationHistory || []),
-    { role: 'user', content: userTranscript?.trim() || '(no speech detected)' },
+    ...(conversationHistory || []).map((m) => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: [{ text: m.content || '' }],
+    })),
+    {
+      role: 'user',
+      content: [{ text: userTranscript?.trim() || '(no speech detected)' }],
+    },
   ];
-  console.log('[Agent] LLM request: messages count=', messages.length);
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages,
-    max_tokens: 150,
-  });
-  const responseText = completion.choices[0]?.message?.content?.trim() || 'Okay.';
-  console.log('[Agent] LLM output:', responseText);
+  const startTime = Date.now();
+  const requestData = {
+    modelId: BEDROCK_MODEL_ID,
+    region: AWS_REGION,
+    messageCount: messages.length,
+    systemPromptLength: SYSTEM_PROMPT.length,
+    userTranscriptLength: userTranscript?.trim()?.length || 0,
+    maxTokens: 150,
+    temperature: 0.7,
+  };
 
-  conversationHistory.push({ role: 'user', content: userTranscript?.trim() || '(no speech detected)' });
-  conversationHistory.push({ role: 'assistant', content: responseText });
+  try {
+    console.log('[Agent] Bedrock request:', requestData);
+    
+    // Log request
+    await logRequest('Bedrock', 'Converse', requestData);
 
-  return responseText;
+    const response = await client.send(
+      new ConverseCommand({
+        modelId: BEDROCK_MODEL_ID,
+        messages,
+        system: [{ text: SYSTEM_PROMPT }],
+        inferenceConfig: {
+          maxTokens: 150,
+          temperature: 0.7,
+        },
+      })
+    );
+
+    const responseText =
+      response.output?.message?.content
+        ?.map((c) => c.text)
+        ?.join('')
+        ?.trim() || 'Okay.';
+
+    const duration = Date.now() - startTime;
+    const inputTokens = response.usage?.inputTokens || 0;
+    const outputTokens = response.usage?.outputTokens || 0;
+    const totalTokens = response.usage?.totalTokens || 0;
+
+    console.log('[Agent] LLM output:', responseText);
+
+    // Log successful response
+    await logResponse('Bedrock', 'Converse', {
+      responseLength: responseText.length,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      durationMs: duration,
+      modelId: BEDROCK_MODEL_ID,
+    });
+
+    // Log response text (truncated)
+    await logInfo('Bedrock', 'ResponseText', {
+      responseText: responseText.substring(0, 500), // Log first 500 chars
+      fullLength: responseText.length,
+    });
+
+    conversationHistory.push({
+      role: 'user',
+      content: userTranscript?.trim() || '(no speech detected)',
+    });
+    conversationHistory.push({ role: 'assistant', content: responseText });
+
+    return responseText;
+  } catch (e) {
+    const duration = Date.now() - startTime;
+    console.error('[Agent] Bedrock error (message):', e.message);
+    console.error('[Agent] Bedrock error (name):', e.name);
+    console.error('[Agent] Bedrock error (code):', e.code);
+    if (e.$metadata) console.error('[Agent] Bedrock error ($metadata):', JSON.stringify(e.$metadata, null, 2));
+    console.error('[Agent] Bedrock error (full):', e);
+    
+    // Log error
+    await logError('Bedrock', 'Converse', e, {
+      durationMs: duration,
+      modelId: BEDROCK_MODEL_ID,
+      messageCount: messages.length,
+    });
+    
+    return 'I apologize, I had trouble processing that.';
+  }
 }
 
-async function streamTTS(text, sendAudioChunk, sendViseme, sendEnd, generateRandomVisemeSequence) {
-  if (!OPENAI_API_KEY) {
+async function streamTTS(text, sendAudioChunk, sendViseme, sendEnd) {
+  if (!hasAWSCredentials()) {
     sendEnd();
     return;
   }
 
-  console.log('[Agent] --- Step 3: Text-to-speech (TTS) ---');
-  const OpenAI = (await import('openai')).default;
-  const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+  console.log('[Agent] --- Step 3: Text-to-speech (Polly Neural) ---');
 
-  let response;
-  try {
-    response = await openai.audio.speech.create({
-      model: 'tts-1',
-      voice: 'alloy',
-      input: text,
-      response_format: 'mp3',
-      speed: 1,
-    });
-  } catch (e) {
-    console.error('[Agent] TTS request failed:', e.message);
-    sendEnd();
-    return;
+  const { PollyClient, SynthesizeSpeechCommand } = await import(
+    '@aws-sdk/client-polly'
+  );
+
+  const polly = new PollyClient({ region: AWS_REGION });
+
+  async function streamAudio() {
+    const startTime = Date.now();
+    let totalBytes = 0;
+    let chunkCount = 0;
+    
+    try {
+      const requestData = {
+        engine: 'neural',
+        voiceId: POLLY_VOICE_ID,
+        outputFormat: 'mp3',
+        sampleRate: '24000',
+        textLength: text.length,
+      };
+
+      // Log request
+      await logRequest('Polly', 'SynthesizeSpeech', {
+        ...requestData,
+        purpose: 'audio',
+      });
+
+      const response = await polly.send(
+        new SynthesizeSpeechCommand({
+          Engine: 'neural',
+          VoiceId: POLLY_VOICE_ID,
+          OutputFormat: 'mp3',
+          SampleRate: '24000',
+          Text: text,
+          TextType: 'text',
+        })
+      );
+      const stream = response.AudioStream;
+      if (stream) {
+        for await (const chunk of stream) {
+          const buf = chunk instanceof Uint8Array ? Buffer.from(chunk) : Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          if (buf.length > 0) {
+            chunkCount++;
+            totalBytes += buf.length;
+            sendAudioChunk(buf);
+          }
+        }
+      }
+
+      const duration = Date.now() - startTime;
+      
+      // Log successful response
+      await logResponse('Polly', 'SynthesizeSpeech', {
+        purpose: 'audio',
+        audioBytes: totalBytes,
+        chunkCount,
+        durationMs: duration,
+        voiceId: POLLY_VOICE_ID,
+        textLength: text.length,
+      });
+    } catch (e) {
+      const duration = Date.now() - startTime;
+      console.error('[Agent] Polly audio failed:', e.message);
+      
+      // Log error
+      await logError('Polly', 'SynthesizeSpeech', e, {
+        purpose: 'audio',
+        durationMs: duration,
+        voiceId: POLLY_VOICE_ID,
+        textLength: text.length,
+      });
+    }
   }
 
-  try {
-    const buffer = await response.arrayBuffer();
-    const arr = new Uint8Array(buffer);
-    console.log('[Agent] TTS: sent', arr.byteLength, 'bytes to client');
-    sendAudioChunk(arr);
-  } catch (e) {
-    console.error('[Agent] TTS read failed:', e.message);
-    sendEnd();
-    return;
+  async function streamVisemes() {
+    const startTime = Date.now();
+    let visemeCount = 0;
+    let buffer = '';
+    
+    try {
+      const requestData = {
+        engine: 'neural',
+        voiceId: POLLY_VOICE_ID,
+        outputFormat: 'json',
+        speechMarkTypes: ['viseme'],
+        textLength: text.length,
+      };
+
+      // Log request
+      await logRequest('Polly', 'SynthesizeSpeech', {
+        ...requestData,
+        purpose: 'visemes',
+      });
+
+      const response = await polly.send(
+        new SynthesizeSpeechCommand({
+          Engine: 'neural',
+          VoiceId: POLLY_VOICE_ID,
+          OutputFormat: 'json',
+          SpeechMarkTypes: ['viseme'],
+          Text: text,
+          TextType: 'text',
+        })
+      );
+      const stream = response.AudioStream;
+      if (stream) {
+        // Process visemes as they stream in (not buffering entire response)
+        // Polly returns newline-delimited JSON, so we process line by line
+        for await (const chunk of stream) {
+          const chunkStr = typeof chunk === 'string' ? chunk : chunk.toString();
+          buffer += chunkStr;
+          
+          // Process complete lines from buffer
+          const lines = buffer.split('\n');
+          // Keep incomplete line in buffer
+          buffer = lines.pop() || '';
+          
+          // Process each complete line immediately
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const mark = JSON.parse(line);
+              if (mark.type === 'viseme' && mark.value != null && mark.time != null) {
+                visemeCount++;
+                // Send viseme immediately as it's parsed (streaming)
+                sendViseme(mark.time, mark.value);
+                if (visemeCount <= 3) {
+                  console.log(`[Agent] Viseme ${visemeCount} sent:`, { time: mark.time, value: mark.value });
+                }
+              }
+            } catch (parseError) {
+              // Skip malformed JSON lines (shouldn't happen with Polly, but be defensive)
+              console.warn('[Agent] Failed to parse viseme line:', line.substring(0, 50));
+            }
+          }
+        }
+        
+        // Process any remaining data in buffer
+        if (buffer.trim()) {
+          try {
+            const mark = JSON.parse(buffer);
+            if (mark.type === 'viseme' && mark.value != null && mark.time != null) {
+              visemeCount++;
+              sendViseme(mark.time, mark.value);
+            }
+          } catch (_) {
+            // Last chunk might be incomplete, ignore parse errors
+          }
+        }
+      }
+
+      const duration = Date.now() - startTime;
+      
+      // Log successful response
+      await logResponse('Polly', 'SynthesizeSpeech', {
+        purpose: 'visemes',
+        visemeCount,
+        durationMs: duration,
+        voiceId: POLLY_VOICE_ID,
+        textLength: text.length,
+      });
+      
+      console.log(`[Agent] Viseme streaming complete: ${visemeCount} visemes sent in ${duration}ms`);
+    } catch (e) {
+      const duration = Date.now() - startTime;
+      console.error('[Agent] Polly visemes failed:', e.message);
+      
+      // Log error
+      await logError('Polly', 'SynthesizeSpeech', e, {
+        purpose: 'visemes',
+        durationMs: duration,
+        voiceId: POLLY_VOICE_ID,
+        textLength: text.length,
+      });
+    }
   }
 
-  const estimatedDurationMs = 1500;
-  const visemes = generateRandomVisemeSequence(estimatedDurationMs, 80);
-  for (const v of visemes) {
-    sendViseme(v.time, v.value);
-  }
+  await Promise.all([streamAudio(), streamVisemes()]);
   sendEnd();
 }
 
-async function sendTestResponse(sendViseme, sendEnd, generateRandomVisemeSequence) {
+async function sendTestResponse(sendViseme, sendEnd) {
+  // Test sequence includes various AWS Polly viseme codes for compatibility testing
+  const VISEME_CODES = ['p', 't', 'S', 'i', 'u', 'a', '@', 'e', 'E', 'o', 'k', 'f', 'm', 'l', 's', 'b', 'd'];
   const durationMs = 2000;
-  const visemes = generateRandomVisemeSequence(durationMs, 80);
-  for (const v of visemes) {
-    sendViseme(v.time, v.value);
+  const intervalMs = 80;
+  for (let t = 0; t < durationMs; t += intervalMs) {
+    const value = VISEME_CODES[Math.floor(Math.random() * VISEME_CODES.length)];
+    sendViseme(t, value);
   }
   sendEnd();
 }
