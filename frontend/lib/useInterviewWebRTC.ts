@@ -2,10 +2,27 @@
 
 import { useCallback, useRef, useState } from 'react';
 
-const WS_URL =
-  process.env.NODE_ENV === 'development'
+function normalizeWsUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  const withWsProtocol = trimmed.replace(/^http/i, 'ws');
+  // Allow host-only values like "wss://api.casey.com" and normalize to /ws.
+  if (!/\/ws(?:[/?#]|$)/.test(withWsProtocol)) {
+    return `${withWsProtocol.replace(/\/+$/, '')}/ws`;
+  }
+  return withWsProtocol;
+}
+
+const configuredWsUrl = process.env.NEXT_PUBLIC_WS_URL?.trim();
+const sameOriginWsBase =
+  typeof window !== 'undefined' && window.location.origin
+    ? window.location.origin.replace(/^http/, 'ws')
+    : '';
+
+const WS_URL = configuredWsUrl
+  ? normalizeWsUrl(configuredWsUrl)
+  : process.env.NODE_ENV === 'development'
     ? 'ws://localhost:3001/ws'
-    : `${typeof window !== 'undefined' && window.location.origin ? window.location.origin.replace(/^http/, 'ws') : ''}/ws`;
+    : `${sameOriginWsBase}/ws`;
 
 export type InterviewWebRTCState = {
   status: 'idle' | 'connecting' | 'connected' | 'error';

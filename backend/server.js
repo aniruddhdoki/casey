@@ -33,6 +33,10 @@ const app = express();
 app.use(express.static('public'));
 const PORT = process.env.PORT || 3001;
 
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 const server = app.listen(PORT, () => {
   console.log(`[Backend] HTTP server listening on ${PORT}`);
 });
