@@ -77,10 +77,10 @@ Compressed context from the deployment and architecture work on the casey backen
 ## 10. Switching enable_alb (true → false) and DependencyViolation
 
 - When changing from **enable_alb = true** to **false**, Terraform plans to update the ECS security group (replace ALB-SG ingress with `0.0.0.0/0`) and destroy the ALB SG. AWS may refuse to delete the ALB security group with: **DependencyViolation: resource sg-xxx has a dependent object** — because the ECS SG still has an ingress rule referencing the ALB SG.
-- **Workaround:** Run a two-step apply so the ECS SG is updated before any ALB SG destroy:
+- **Automatic fix:** The [deploy.sh](deploy.sh) script now automatically detects this scenario and performs a two-step apply to avoid the error.
+- **Manual fix:** If you encounter this error, run [scripts/fix-alb-dependency-violation.sh](scripts/fix-alb-dependency-violation.sh) or manually:
   1. `terraform apply -target=aws_security_group.ecs` (updates ECS SG to use 0.0.0.0/0, removing reference to ALB SG).
   2. `terraform apply` (destroys ALB, target group, ALB SG).
-- Alternatively, ensure Terraform applies the ECS SG update in the same apply and that it is applied before destroy (Terraform usually does updates before destroys; if ordering still fails, use `-target` as above).
 
 ---
 
@@ -96,6 +96,7 @@ Compressed context from the deployment and architecture work on the casey backen
 | Admin IAM policy | [terraform/iam_admin.tf](terraform/iam_admin.tf) |
 | Deploy script | [deploy.sh](deploy.sh) |
 | Get task IP | [scripts/get-backend-url.sh](scripts/get-backend-url.sh) |
+| Fix ALB DependencyViolation | [scripts/fix-alb-dependency-violation.sh](scripts/fix-alb-dependency-violation.sh) |
 | Import existing resources | [scripts/terraform-import-existing.sh](scripts/terraform-import-existing.sh), [terraform/README.md](terraform/README.md) (Troubleshooting) |
 | Backend IAM (service) | [terraform/iam.tf](terraform/iam.tf) |
 
@@ -111,6 +112,9 @@ Compressed context from the deployment and architecture work on the casey backen
 
 # When ALB disabled: get current task IP and WebSocket URL
 ./scripts/get-backend-url.sh
+
+# Fix DependencyViolation when switching from enable_alb=true to false
+./scripts/fix-alb-dependency-violation.sh
 
 # Import existing log group / IAM policy after "already exists" errors
 ./scripts/terraform-import-existing.sh

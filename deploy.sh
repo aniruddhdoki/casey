@@ -110,17 +110,86 @@ if [ "$SKIP_TERRAFORM" = false ]; then
   echo "Planning Terraform changes..."
   terraform plan -out=tfplan
   
-  if [ "$TERRAFORM_AUTO_APPROVE" = true ]; then
-    echo "Applying Terraform changes (auto-approved)..."
-    terraform apply tfplan
+  # Check if we're switching from ALB enabled to disabled (DependencyViolation workaround)
+  # This happens when aws_security_group.alb is being destroyed and aws_security_group.ecs is being updated
+  if command -v jq &> /dev/null; then
+    PLAN_OUTPUT=$(terraform show -json tfplan 2>/dev/null || echo "")
+    if [ -n "$PLAN_OUTPUT" ]; then
+      ALB_SG_DESTROY=$(echo "$PLAN_OUTPUT" | jq -r '.resource_changes[]? | select(.type == "aws_security_group" and .name == "alb" and (.change.actions[]? == "delete" or .change.actions[]? == "destroy")) | .address' | head -1)
+      ECS_SG_UPDATE=$(echo "$PLAN_OUTPUT" | jq -r '.resource_changes[]? | select(.type == "aws_security_group" and .name == "ecs" and (.change.actions[]? == "update" or .change.actions[]? == "modify")) | .address' | head -1)
+      
+      if [ -n "$ALB_SG_DESTROY" ] && [ -n "$ECS_SG_UPDATE" ]; then
+        echo -e "${YELLOW}Detected ALB disable scenario (switching from enable_alb=true to false)${NC}"
+        echo -e "${YELLOW}Applying two-step fix to avoid DependencyViolation...${NC}"
+        
+        if [ "$TERRAFORM_AUTO_APPROVE" = true ]; then
+          echo "Step 1: Updating ECS security group first..."
+          terraform apply -target="$ECS_SG_UPDATE" -auto-approve
+          echo "Step 2: Applying remaining changes..."
+          terraform apply tfplan
+        else
+          echo -e "${YELLOW}This requires a two-step apply to avoid AWS DependencyViolation.${NC}"
+          echo -e "${YELLOW}Step 1: Update ECS security group (removes ALB reference)${NC}"
+          echo -e "${YELLOW}Step 2: Destroy ALB resources${NC}"
+          echo -e "${YELLOW}Proceed with two-step apply? (y/N)${NC}"
+          read -r response
+          if [[ "$response" =~ ^[Yy]$ ]]; then
+            echo "Step 1: Updating ECS security group first..."
+            terraform apply -target="$ECS_SG_UPDATE"
+            echo "Step 2: Applying remaining changes..."
+            terraform apply tfplan
+          else
+            echo "Terraform apply cancelled"
+            exit 1
+          fi
+        fi
+      else
+        # Normal apply
+        if [ "$TERRAFORM_AUTO_APPROVE" = true ]; then
+          echo "Applying Terraform changes (auto-approved)..."
+          terraform apply tfplan
+        else
+          echo -e "${YELLOW}Review the plan above. Apply? (y/N)${NC}"
+          read -r response
+          if [[ "$response" =~ ^[Yy]$ ]]; then
+            terraform apply tfplan
+          else
+            echo "Terraform apply cancelled"
+            exit 1
+          fi
+        fi
+      fi
+    else
+      # Fallback to normal apply if plan parsing fails
+      if [ "$TERRAFORM_AUTO_APPROVE" = true ]; then
+        echo "Applying Terraform changes (auto-approved)..."
+        terraform apply tfplan
+      else
+        echo -e "${YELLOW}Review the plan above. Apply? (y/N)${NC}"
+        read -r response
+        if [[ "$response" =~ ^[Yy]$ ]]; then
+          terraform apply tfplan
+        else
+          echo "Terraform apply cancelled"
+          exit 1
+        fi
+      fi
+    fi
   else
-    echo -e "${YELLOW}Review the plan above. Apply? (y/N)${NC}"
-    read -r response
-    if [[ "$response" =~ ^[Yy]$ ]]; then
+    # Fallback to normal apply if jq is not available
+    # User can manually run scripts/fix-alb-dependency-violation.sh if needed
+    if [ "$TERRAFORM_AUTO_APPROVE" = true ]; then
+      echo "Applying Terraform changes (auto-approved)..."
       terraform apply tfplan
     else
-      echo "Terraform apply cancelled"
-      exit 1
+      echo -e "${YELLOW}Review the plan above. Apply? (y/N)${NC}"
+      read -r response
+      if [[ "$response" =~ ^[Yy]$ ]]; then
+        terraform apply tfplan
+      else
+        echo "Terraform apply cancelled"
+        exit 1
+      fi
     fi
   fi
   
