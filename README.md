@@ -69,6 +69,17 @@ This runs on **http://localhost:3000** by default (Next.js dev server).
 |---|---|---|---|
 | `OPENAI_API_KEY` | `backend/.env` | No (but needed for real AI) | OpenAI API key for Whisper, GPT-4o-mini, and TTS |
 | `PORT` | `backend/.env` | No | Backend port (default: `3001`) |
+| `NEXT_PUBLIC_WS_URL` | Frontend build env | No | WebSocket URL for signaling in production (for example `wss://api.casey.com/ws`). If omitted in development, frontend defaults to `ws://localhost:3001/ws`. |
+
+### Production frontend wiring
+
+When deploying the frontend (for example on Vercel), set `NEXT_PUBLIC_WS_URL` to your deployed backend WebSocket endpoint and redeploy the frontend build. Example:
+
+```bash
+NEXT_PUBLIC_WS_URL=wss://api.casey.com/ws
+```
+
+The interview page will then connect to the production backend instead of assuming same-origin `/ws`.
 
 ## Scripts
 
@@ -88,6 +99,50 @@ This runs on **http://localhost:3000** by default (Next.js dev server).
 | `npm run build` | Production build |
 | `npm start` | Serve production build |
 | `npm run lint` | Run ESLint |
+
+## Deployment
+
+### Backend to AWS ECS
+
+Deploy the backend to AWS ECS Fargate using the provided deployment script:
+
+```bash
+# Full deployment (Terraform + Docker + ECS)
+./deploy.sh
+
+# Skip Terraform if infrastructure already exists
+./deploy.sh --skip-terraform
+
+# Use a specific image tag
+./deploy.sh --image-tag v1.0.0
+
+# Auto-approve Terraform (no confirmation)
+./deploy.sh --auto-approve
+```
+
+The script will:
+1. Apply Terraform infrastructure (ECR, ECS; ALB only if enabled)
+2. Build and push Docker image to ECR
+3. Update ECS service with new image
+4. Wait for deployment to stabilize
+5. Output backend endpoints (or run `./scripts/get-backend-url.sh` when ALB is disabled)
+
+**ALB vs direct task access:** By default Terraform does not create an ALB (`enable_alb=false`), so the backend is reached via the ECS task public IP. After deploy, run `./scripts/get-backend-url.sh` to get the current task IP and set `NEXT_PUBLIC_WS_URL=ws://<IP>:3001/ws`. When your AWS account supports load balancers, set `enable_alb=true` (e.g. in `terraform/variables.tf` or `-var="enable_alb=true"`) and redeploy to use a stable ALB URL.
+
+**Prerequisites:**
+- AWS CLI configured with admin credentials
+- Terraform installed
+- Docker installed
+- AWS credentials with permissions to create ECR, ECS, IAM resources (and ALB when enable_alb=true)
+
+See `terraform/README.md` for detailed infrastructure setup and configuration options.
+
+### Quick backend update (infrastructure already exists)
+
+```bash
+# Update backend container only
+./scripts/deploy-backend.sh [image-tag]
+```
 
 ## Troubleshooting
 
