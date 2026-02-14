@@ -30,6 +30,16 @@ The interview flow uses WebRTC for full-duplex audio and a DataChannel for strea
 
 3. **Test**: Click **Start interview** (allow mic), wait for **Connected**. The backend will stream a short TTS + visemes; when the stream ends, the avatar plays the response and lip-syncs. Use **Download recording** to save the captured mic audio for verification. Check the browser and backend consoles for logs at each layer.
 
+### Production backend URL
+
+Set `NEXT_PUBLIC_WS_URL` in your frontend deployment environment to point to the backend WebSocket endpoint:
+
+```bash
+NEXT_PUBLIC_WS_URL=wss://api.casey.com/ws
+```
+
+If this variable is not set, development keeps using `ws://localhost:3001/ws`.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
