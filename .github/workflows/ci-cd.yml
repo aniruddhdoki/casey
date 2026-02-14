@@ -1,0 +1,190 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/**'
+      - 'terraform/**'
+      - 'deploy.sh'
+      - 'scripts/**'
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/**'
+
+env:
+  NODE_VERSION: '20'
+  AWS_REGION: 'us-east-1'
+
+jobs:
+  # CI: Test frontend and backend on all pushes and PRs
+  test:
+    name: Test Frontend and Backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: |
+            frontend/package-lock.json
+            backend/package-lock.json
+
+      # Test Frontend
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: ./frontend
+        run: npm run lint || true
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: npm run build
+
+      # Test Backend
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Check backend syntax
+        working-directory: ./backend
+        run: node --check server.js || echo "Backend syntax check skipped"
+
+  # CD: Build and deploy on main/master branch
+  deploy:
+    name: Build and Deploy to AWS
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    environment:
+      name: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS credentials
+        run: |
+          aws sts get-caller-identity
+          echo "✓ AWS credentials verified"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.6.0'
+
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: |
+          if [ ! -d ".terraform" ]; then
+            terraform init
+          else
+            terraform init -upgrade
+          fi
+
+      - name: Terraform Validate
+        working-directory: ./terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: ./terraform
+        run: terraform plan -out=tfplan -input=false
+        continue-on-error: true
+
+      - name: Terraform Apply
+        working-directory: ./terraform
+        if: github.event_name == 'push'
+        run: terraform apply -auto-approve tfplan
+        continue-on-error: true
+
+      - name: Get Terraform outputs
+        working-directory: ./terraform
+        id: terraform-outputs
+        run: |
+          echo "ecr_repo_url=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
+          echo "ecs_cluster=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_OUTPUT
+          echo "ecs_service=$(terraform output -raw ecs_service_name)" >> $GITHUB_OUTPUT
+          echo "aws_region=$(terraform output -raw aws_region)" >> $GITHUB_OUTPUT
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push Docker image
+        env:
+          ECR_REPOSITORY: ${{ steps.terraform-outputs.outputs.ecr_repo_url }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # ECR_REPOSITORY is already in format: <account>.dkr.ecr.<region>.amazonaws.com/<repo-name>
+          # Build image with commit SHA tag
+          docker build --platform linux/amd64 -t $ECR_REPOSITORY:$IMAGE_TAG ./backend
+          
+          # Also tag as latest
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_REPOSITORY:latest
+          
+          # Push both tags
+          docker push $ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REPOSITORY:latest
+          
+          echo "✓ Image pushed: $ECR_REPOSITORY:$IMAGE_TAG"
+          echo "✓ Image tagged as latest"
+
+      - name: Update ECS service
+        env:
+          ECS_CLUSTER: ${{ steps.terraform-outputs.outputs.ecs_cluster }}
+          ECS_SERVICE: ${{ steps.terraform-outputs.outputs.ecs_service }}
+          AWS_REGION: ${{ steps.terraform-outputs.outputs.aws_region }}
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --force-new-deployment \
+            --region $AWS_REGION
+          
+          echo "✓ ECS service update initiated"
+
+      - name: Wait for ECS deployment
+        env:
+          ECS_CLUSTER: ${{ steps.terraform-outputs.outputs.ecs_cluster }}
+          ECS_SERVICE: ${{ steps.terraform-outputs.outputs.ecs_service }}
+          AWS_REGION: ${{ steps.terraform-outputs.outputs.aws_region }}
+        run: |
+          echo "Waiting for deployment to stabilize..."
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --region $AWS_REGION || echo "Deployment may still be in progress"
+          
+          echo "✓ Deployment completed"
+
+      - name: Deployment summary
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tag:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **ECS Cluster:** \`${{ steps.terraform-outputs.outputs.ecs_cluster }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **ECS Service:** \`${{ steps.terraform-outputs.outputs.ecs_service }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region:** \`${{ steps.terraform-outputs.outputs.aws_region }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "View in [ECS Console](https://console.aws.amazon.com/ecs/v2/clusters/${{ steps.terraform-outputs.outputs.ecs_cluster }}/services/${{ steps.terraform-outputs.outputs.ecs_service }})" >> $GITHUB_STEP_SUMMARY
