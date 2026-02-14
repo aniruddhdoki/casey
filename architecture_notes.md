@@ -1,1 +1,0 @@
-frontend deployed on vercel. using aws resources for the backend. database currently in mongodb
